@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>AI対戦オセロ (最終決戦版)</title>
+    <style>
+        /* 基本設定 */
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            background-color: #f0f0f0;
+        }
+
+        h1 {
+            color: #333;
+        }
+
+        #message {
+            font-size: 1.2em;
+            margin: 10px 0;
+            font-weight: bold;
+        }
+
+        /* オセロ盤の設定 */
+        #board-container {
+            display: grid;
+            grid-template-columns: repeat(8, 60px); 
+            grid-template-rows: repeat(8, 60px);    
+            width: 480px; 
+            height: 480px;
+            border: 3px solid #333;
+            margin: 20px auto; 
+            box-shadow: 5px 5px 10px rgba(0, 0, 0, 0.5);
+        }
+
+        /* マスのスタイル */
+        .cell {
+            width: 60px;
+            height: 60px;
+            background-color: #008000;
+            border: 1px solid #000;
+            display: flex;
+            justify-content: center; 
+            align-items: center;
+            cursor: pointer;
+            position: relative;
+        }
+
+        /* 石の共通スタイル */
+        .disc {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            transition: background-color 0.3s ease; 
+        }
+
+        /* 黒い石 */
+        .disc.black {
+            background-color: black;
+        }
+
+        /* 白い石 */
+        .disc.white {
+            background-color: white;
+        }
+
+        /* 置けるマスにヒントを表示 */
+        .cell.hint::after {
+            content: '';
+            display: block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: rgba(255, 255, 255, 0.6);
+            position: absolute;
+        }
+    </style>
+</head>
+<body>
+    <h1>AI対戦オセロ (最終決戦版)</h1>
+    
+    <div id="message">ゲーム開始！あなたの番です (黒)</div>
+
+    <div id="board-container"></div>
+    
+    <button id="reset-button">ゲームリセット</button>
+
+    <script>
+        // --- 定数と変数 ---
+        const EMPTY = 0;
+        const BLACK = 1; // プレイヤー
+        const WHITE = 2; // AI
+
+        // 【最終調整済みの評価テーブル】
+        const POSITION_WEIGHTS = [
+            [ 100, -20,  10,  5,  5,  10, -20,  100], 
+            [-20, -50,  -2, -2, -2,  -2, -50,  -20], 
+            [ 10,  -2,  -1, -1, -1,  -1,  -2,   10],
+            [  5,  -2,  -1,  0,  0,  -1,  -2,    5],
+            [  5,  -2,  -1,  0,  0,  -1,  -2,    5],
+            [ 10,  -2,  -1, -1, -1,  -1,  -2,   10],
+            [-20, -50,  -2, -2, -2,  -2, -50,  -20],
+            [ 100, -20,  10,  5,  5,  10, -20,  100]
+        ];
+        
+        // 【最終調整済みのゲームパラメータ】
+        const MIDGAME_SEARCH_DEPTH = 6; // 中盤戦の探索深さ
+        const ENDGAME_THRESHOLD = 15;   // 空きマスが15以下で全探索開始
+        const MOBILITY_WEIGHT = 5;      
+        const STABILITY_WEIGHT = 50;    // 安定性評価の重み
+
+        let board; 
+        let currentPlayer;
+        let isGameOver = false;
+        const boardContainer = document.getElementById('board-container');
+        const messageElement = document.getElementById('message');
+        const resetButton = document.getElementById('reset-button');
+
+        const DIRECTIONS = [
+            [-1, 0], [1, 0], [0, -1], [0, 1], 
+            [-1, -1], [-1, 1], [1, -1], [1, 1]
+        ];
+
+        // --- 基本関数 ---
+
+        function updateMessage(text) {
+            messageElement.textContent = text;
+        }
+
+        function initGame() {
+            board = [
+                [0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, WHITE, BLACK, 0, 0, 0],
+                [0, 0, 0, BLACK, WHITE, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0]
+            ];
+            currentPlayer = BLACK;
+            isGameOver = false;
+            drawBoard();
+            updateMessage("ゲーム開始！あなたの番です (黒)");
+        }
+        
+        function getFlips(currentBoard, r, c, player) {
+            if (currentBoard[r][c] !== EMPTY) return []; 
+            const opponent = player === BLACK ? WHITE : BLACK;
+            let flippedDiscs = [];
+            for (const [dr, dc] of DIRECTIONS) {
+                let currentFlips = [];
+                let nr = r + dr;
+                let nc = c + dc;
+                while (nr >= 0 && nr < 8 && nc >= 0 && nc < 8 && currentBoard[nr][nc] === opponent) {
+                    currentFlips.push({ row: nr, col: nc });
+                    nr += dr;
+                    nc += dc;
+                }
+                if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8 && currentBoard[nr][nc] === player) {
+                    flippedDiscs.push(...currentFlips);
+                }
+            }
+            return flippedDiscs;
+        }
+
+        function isValidMove(currentBoard, r, c, player) {
+            return getFlips(currentBoard, r, c, player).length > 0;
+        }
+
+        function makeMove(currentBoard, r, c, player) {
+            const flips = getFlips(currentBoard, r, c, player);
+            currentBoard[r][c] = player;
+            for (const { row, col } of flips) {
+                currentBoard[row][col] = player;
+            }
+        }
+
+        function getValidMoves(currentBoard, player) {
+            const moves = [];
+            for (let r = 0; r < 8; r++) {
+                for (let c = 0; c < 8; c++) {
+                    if (currentBoard[r][c] === EMPTY && isValidMove(currentBoard, r, c, player)) {
+                        moves.push({ row: r, col: c });
+                    }
+                }
+            }
+            return moves;
+        }
+
+        function countEmptyCells(currentBoard) {
+            let emptyCount = 0;
+            for (let r = 0; r < 8; r++) {
+                for (let c = 0; c < 8; c++) {
+                    if (currentBoard[r][c] === EMPTY) emptyCount++;
+                }
+            }
+            return emptyCount;
+        }
+        
+        // --- AIロジック（ミニマックス/評価関数） ---
+        
+        function checkGameOverState(currentBoard) {
+            const blackMoves = getValidMoves(currentBoard, BLACK).length;
+            const whiteMoves = getValidMoves(currentBoard, WHITE).length;
+            return blackMoves === 0 && whiteMoves === 0;
+        }
+
+        function finalScoreEvaluation(currentBoard) {
+            let whiteCount = 0;
+            let blackCount = 0;
+            for (let r = 0; r < 8; r++) {
+                for (let c = 0; c < 8; c++) {
+                    if (currentBoard[r][c] === WHITE) whiteCount++;
+                    if (currentBoard[r][c] === BLACK) blackCount++;
+                }
+            }
+            return (whiteCount - blackCount) * 100000; 
+        }
+        
+        // 【安定性評価】角の確定石を数える
+        function countStability(currentBoard, player) {
+            let stabilityCount = 0;
+            const corners = [[0, 0], [0, 7], [7, 0], [7, 7]];
+            for (const [r, c] of corners) {
+                if (currentBoard[r][c] === player) {
+                    stabilityCount++;
+                }
+            }
+            return stabilityCount;
+        }
+
+
+        /**
+         * 【最終調整済】中盤戦の評価関数（位置 + モビリティ + 安定性 + 動的重み）
+         */
+        function midgameEvaluation(currentBoard) {
+            const emptyCells = countEmptyCells(currentBoard);
+            
+            let whiteScore = 0;
+            let blackScore = 0;
+            
+            // 1. 位置評価 (Placement Score)
+            for (let r = 0; r < 8; r++) {
+                for (let c = 0; c < 8; c++) {
+                    const weight = POSITION_WEIGHTS[r][c];
+                    if (currentBoard[r][c] === WHITE) {
+                        whiteScore += weight;
+                    } else if (currentBoard[r][c] === BLACK) {
+                        blackScore += weight;
+                    }
+                }
+            }
+            
+            // 2. モビリティ評価 (Mobility Score)
+            const whiteMobility = getValidMoves(currentBoard, WHITE).length;
+            const blackMobility = getValidMoves(currentBoard, BLACK).length;
+            const mobilityScore = MOBILITY_WEIGHT * (whiteMobility - blackMobility);
+            
+            // 3. 安定性評価 (Stability Score)
+            const stabilityScore = STABILITY_WEIGHT * (countStability(currentBoard, WHITE) - countStability(currentBoard, BLACK));
+            
+            // 4. 【動的重み調整】ゲームの進行度で重みを調整
+            // 序盤(60)→終盤(15)に近づくにつれて石数の価値が上がる
+            const progress = (64 - emptyCells) / 64; 
+            // 位置/石数の重要度を序盤20%から終盤80%へ線形に増加
+            const dynamicWeight = 0.2 + (0.8 * progress); 
+
+
+            // 最終スコア: (動的石数評価) + (モビリティ評価) + (安定性評価)
+            const placementScore = (whiteScore - blackScore) * dynamicWeight;
+            
+            return placementScore + mobilityScore + stabilityScore;
+        }
+        
+
+        // アルファベータ枝刈り付きミニマックス法
+        function minimax(currentBoard, depth, alpha, beta, isMaximizingPlayer) {
+            const emptyCells = countEmptyCells(currentBoard);
+            const isEndgame = emptyCells <= ENDGAME_THRESHOLD;
+
+            // 探索終了条件
+            if (depth === 0 || checkGameOverState(currentBoard) || isEndgame) {
+                if (checkGameOverState(currentBoard) || isEndgame) {
+                     return finalScoreEvaluation(currentBoard);
+                }
+                return midgameEvaluation(currentBoard);
+            }
+
+            const player = isMaximizingPlayer ? WHITE : BLACK;
+            const validMoves = getValidMoves(currentBoard, player);
+            
+            // パスの処理
+            if (validMoves.length === 0) {
+                return minimax(currentBoard, depth - 1, alpha, beta, !isMaximizingPlayer);
+            }
+
+            if (isMaximizingPlayer) {
+                let maxEval = -Infinity;
+                for (const move of validMoves) {
+                    const newBoard = currentBoard.map(row => [...row]); 
+                    makeMove(newBoard, move.row, move.col, player);
+                    const evaluation = minimax(newBoard, depth - 1, alpha, beta, false);
+                    maxEval = Math.max(maxEval, evaluation);
+                    alpha = Math.max(alpha, maxEval);
+                    if (beta <= alpha) break; 
+                }
+                return maxEval;
+            } else {
+                let minEval = Infinity;
+                for (const move of validMoves) {
+                    const newBoard = currentBoard.map(row => [...row]);
+                    makeMove(newBoard, move.row, move.col, player);
+                    const evaluation = minimax(newBoard, depth - 1, alpha, beta, true);
+                    minEval = Math.min(minEval, evaluation);
+                    beta = Math.min(beta, minEval);
+                    if (beta <= alpha) break; 
+                }
+                return minEval;
+            }
+        }
+
+        // AIの最善手を決定するメイン関数
+        function findAIBestMove(currentBoard) {
+            const validMoves = getValidMoves(currentBoard, WHITE);
+            if (validMoves.length === 0) return null;
+
+            const emptyCells = countEmptyCells(currentBoard);
+            const isEndgame = emptyCells <= ENDGAME_THRESHOLD;
+            const depth = isEndgame ? emptyCells : MIDGAME_SEARCH_DEPTH;
+
+            if(isEndgame) {
+                updateMessage(`AI (白) の思考中です...【終盤パーフェクトサーチ: ${depth}手読み】`);
+            } else {
+                updateMessage(`AI (白) の思考中です...【中盤究極サーチ: ${depth}手読み】`);
+            }
+
+            let bestMove = null;
+            let maxEval = -Infinity;
+            let alpha = -Infinity;
+            const beta = Infinity;
+
+            for (const move of validMoves) {
+                const newBoard = currentBoard.map(row => [...row]);
+                makeMove(newBoard, move.row, move.col, WHITE);
+
+                const evaluation = minimax(newBoard, depth - 1, alpha, beta, false);
+
+                if (evaluation > maxEval) {
+                    maxEval = evaluation;
+                    bestMove = move;
+                }
+                alpha = Math.max(alpha, maxEval);
+            }
+            return bestMove;
+        }
+
+        // --- 描画とゲームフロー ---
+        
+        function drawBoard() {
+            boardContainer.innerHTML = '';
+            const validMoves = (!isGameOver && currentPlayer === BLACK) ? getValidMoves(board, BLACK) : [];
+
+            for (let r = 0; r < 8; r++) {
+                for (let c = 0; c < 8; c++) {
+                    const cell = document.createElement('div');
+                    cell.classList.add('cell');
+                    cell.dataset.row = r;
+                    cell.dataset.col = c;
+                    cell.addEventListener('click', handleCellClick);
+
+                    const isHint = validMoves.some(move => move.row === r && move.col === c);
+                    if (isHint) {
+                        cell.classList.add('hint');
+                    }
+
+                    if (board[r][c] !== EMPTY) {
+                        const disc = document.createElement('div');
+                        disc.classList.add('disc');
+                        if (board[r][c] === BLACK) {
+                            disc.classList.add('black');
+                        } else if (board[r][c] === WHITE) {
+                            disc.classList.add('white');
+                        }
+                        cell.appendChild(disc);
+                    }
+                    boardContainer.appendChild(cell);
+                }
+            }
+        }
+
+        function checkGameEnd() {
+            const blackMoves = getValidMoves(board, BLACK).length;
+            const whiteMoves = getValidMoves(board, WHITE).length;
+
+            if (blackMoves === 0 && whiteMoves === 0) {
+                isGameOver = true;
+                let blackCount = 0;
+                let whiteCount = 0;
+
+                for (let r = 0; r < 8; r++) {
+                    for (let c = 0; c < 8; c++) {
+                        if (board[r][c] === BLACK) blackCount++;
+                        if (board[r][c] === WHITE) whiteCount++;
+                    }
+                }
+
+                let result = `ゲーム終了！黒: ${blackCount}、白: ${whiteCount}。`;
+                if (blackCount > whiteCount) {
+                    result += "あなたの勝ちです！🎉";
+                } else if (whiteCount > blackCount) {
+                    result += "AIの勝ちです。🤖";
+                } else {
+                    result += "引き分けです。";
+                }
+                updateMessage(result);
+                return true;
+            }
+            return false;
+        }
+
+        function runAI() {
+            const validMoves = getValidMoves(board, WHITE);
+
+            if (validMoves.length > 0) {
+                const bestMove = findAIBestMove(board);
+
+                makeMove(board, bestMove.row, bestMove.col, WHITE);
+                
+                if (checkGameEnd()) {
+                    drawBoard();
+                    return;
+                }
+                
+                currentPlayer = BLACK;
+                
+                if (getValidMoves(board, BLACK).length > 0) {
+                     updateMessage("あなたの番です (黒)");
+                     drawBoard(); 
+                } else {
+                     updateMessage("あなたはパスです。AIの番が続きます。");
+                     currentPlayer = WHITE;
+                     setTimeout(runAI, 1000); 
+                }
+            } else {
+                updateMessage("AIはパスです。あなたの番が続きます (黒)");
+                currentPlayer = BLACK;
+                
+                if (getValidMoves(board, BLACK).length === 0) {
+                    checkGameEnd();
+                }
+                
+                drawBoard(); 
+            }
+        }
+
+        function handleCellClick(event) {
+            if (isGameOver || currentPlayer !== BLACK) {
+                return;
+            }
+
+            const row = parseInt(event.currentTarget.dataset.row);
+            const col = parseInt(event.currentTarget.dataset.col);
+
+            if (isValidMove(board, row, col, BLACK)) {
+                makeMove(board, row, col, BLACK);
+                
+                if (checkGameEnd()) {
+                    drawBoard();
+                    return;
+                }
+                
+                currentPlayer = WHITE;
+                
+                drawBoard(); 
+
+                // 終盤戦の負荷を考慮し、思考時間は長めに設定（1秒）
+                setTimeout(() => {
+                    if (isGameOver) return;
+
+                    if (getValidMoves(board, WHITE).length > 0) {
+                        runAI();
+                    } else {
+                        updateMessage("AIはパスです。あなたの番が続きます (黒)");
+                        currentPlayer = BLACK;
+
+                        if (getValidMoves(board, BLACK).length === 0) {
+                            checkGameEnd();
+                        }
+                        drawBoard();
+                    }
+                }, 1000); 
+
+            } else {
+                updateMessage("そこには置けません。白い点が表示されているマスを選んでください。");
+            }
+        }
+
+        // --- 初期化とイベントリスナー ---
+        initGame();
+        resetButton.addEventListener('click', initGame);
+    </script>
+</body>
+</html>
